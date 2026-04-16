@@ -69,7 +69,7 @@ def analyze_image(image_pil, user_notes, codes_text, prompt_text):
     if not key_configured:
         return "❌ API key missing. Add in sidebar or configure secrets."
     try:
-        model = genai.GenerativeModel("gemini-2.0-flash")
+        model = genai.GenerativeModel("gemini-2.5-flash")
         full = f"{prompt_text}\n\nCodes:\n{codes_text}\n\nInspector notes: {user_notes}\nAnalyze the photo."
         response = model.generate_content([full, image_pil])
         return response.text

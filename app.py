@@ -11,7 +11,7 @@ import re
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
-st.set_page_config(page_title="Engineering Inspector Pro", layout="wide")
+st.set_page_config(page_title="Nemean Engineering Inspector", layout="wide")
 st.title("🔍 Engineering Inspector Pro")
 st.markdown("Upload photos + reference documents → AI analyzes compliance → Generate custom report")
 

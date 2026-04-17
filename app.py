@@ -9,7 +9,6 @@ import docx
 import json
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import requests
-from streamlit.components.v1 import html
 
 st.set_page_config(page_title="Nemean Engineering Inspector", layout="wide")
 st.title("🏗️ Nemean Engineering Inspector (Cloud Persistent)")
@@ -112,46 +111,58 @@ with st.sidebar:
         st.success("✅ Gemini API ready")
     
     st.markdown("---")
-    mode = st.radio("Main mode", ["Deficiency & Compliance", "Work Progress Tracking"])
     
-    st.markdown("---")
-    
-    if mode == "Deficiency & Compliance":
-        st.subheader("📜 Reference (Codes / Tender)")
-        ref_type = st.radio("Reference type", ["Building Codes (OBC/OFC)", "Tender / CCDC Documents"])
-        if ref_type == "Building Codes (OBC/OFC)":
-            default_ref = """
+    # ============================================================
+    # 1. COMPLIANCE REFERENCE SECTION (always visible)
+    # ============================================================
+    st.subheader("📜 Compliance Reference (always active)")
+    ref_type = st.radio("Reference type", ["Building Codes (OBC/OFC)", "Tender / CCDC Documents"], key="ref_type")
+    if ref_type == "Building Codes (OBC/OFC)":
+        default_ref = """
 Ontario Building Code 2012: Section 9 (Housing), 5 (Environmental Separation)
 Ontario Fire Code O.Reg 213/07
 CSA A440.2 (Windows/Doors), CSA A23.1 (Concrete)
 ASTM C920 (Sealants), ASTM D6163 (Modified bitumen)
 OBC 9.26 (Roof coverings), 9.27 (Cladding), 5.4 (Moisture protection)
 """
-            st.session_state["reference_text"] = st.text_area("Reference codes", value=default_ref.strip(), height=200)
+        st.session_state["reference_text"] = st.text_area("Reference codes (editable)", value=default_ref.strip(), height=200, key="codes_area")
+    else:
+        ref_files = st.file_uploader("Upload PDF/DOCX/TXT (tender, CCDC)", type=["pdf","docx","txt"], accept_multiple_files=True, key="tender_files")
+        if ref_files:
+            combined = ""
+            for f in ref_files:
+                try:
+                    if f.type == "application/pdf":
+                        reader = PyPDF2.PdfReader(f)
+                        for page in reader.pages:
+                            combined += page.extract_text() or ""
+                    elif f.type == "application/vnd.openxmlformats-officedocument.wordprocessingml.document":
+                        doc = docx.Document(f)
+                        combined += "\n".join([p.text for p in doc.paragraphs])
+                    else:
+                        combined += f.read().decode("utf-8")
+                except Exception as e:
+                    st.error(f"Error reading {f.name}: {e}")
+            st.session_state["reference_text"] = combined
+            with st.expander("Preview extracted text"):
+                st.text(combined[:1000] + ("..." if len(combined)>1000 else ""))
         else:
-            ref_files = st.file_uploader("Upload PDF/DOCX/TXT (tender, CCDC)", type=["pdf","docx","txt"], accept_multiple_files=True)
-            if ref_files:
-                combined = ""
-                for f in ref_files:
-                    try:
-                        if f.type == "application/pdf":
-                            reader = PyPDF2.PdfReader(f)
-                            for page in reader.pages:
-                                combined += page.extract_text() or ""
-                        elif f.type == "application/vnd.openxmlformats-officedocument.wordprocessingml.document":
-                            doc = docx.Document(f)
-                            combined += "\n".join([p.text for p in doc.paragraphs])
-                        else:
-                            combined += f.read().decode("utf-8")
-                    except Exception as e:
-                        st.error(f"Error reading {f.name}: {e}")
-                st.session_state["reference_text"] = combined
-                with st.expander("Preview extracted text"):
-                    st.text(combined[:1000] + ("..." if len(combined)>1000 else ""))
-            else:
-                st.info("Upload tender/CCDC documents for compliance analysis.")
+            st.info("Upload tender/CCDC documents for compliance analysis.")
+            st.session_state["reference_text"] = ""
     
-    else:  # Progress Tracking mode
+    st.markdown("---")
+    
+    # ============================================================
+    # 2. MODE SELECTOR
+    # ============================================================
+    mode = st.radio("Main mode", ["Deficiency & Compliance", "Work Progress Tracking"])
+    
+    st.markdown("---")
+    
+    # ============================================================
+    # 3. WORK PROGRESS TRACKING SECTION (only when mode selected)
+    # ============================================================
+    if mode == "Work Progress Tracking":
         st.subheader("📁 Project Management (Cloud)")
         project_names = list(st.session_state.projects.keys())
         selected = st.selectbox("Select or create project", ["-- New Project --"] + project_names)
@@ -196,15 +207,24 @@ OBC 9.26 (Roof coverings), 9.27 (Cladding), 5.4 (Moisture protection)
                 del st.session_state.projects[selected]
                 st.session_state.current_project = None
                 st.rerun()
-        st.session_state["reference_text"] = st.text_area("Project scope / schedule notes (optional)", height=100)
+        # Optional project notes (not for compliance)
+        st.text_area("Additional project notes (e.g., schedule, client comments)", height=80, key="project_notes")
     
     st.markdown("---")
+    
+    # ============================================================
+    # 4. ANALYSIS PROMPT (always visible)
+    # ============================================================
     st.subheader("✏️ Analysis Prompt")
     prompt_editor = st.text_area("Edit prompt (persistent)", value=st.session_state["persistent_prompt"], height=200)
     if prompt_editor != st.session_state["persistent_prompt"]:
         st.session_state["persistent_prompt"] = prompt_editor
     
     st.markdown("---")
+    
+    # ============================================================
+    # 5. REPORT TEMPLATE (always visible)
+    # ============================================================
     st.subheader("📝 Report Template")
     template_file = st.file_uploader("Upload HTML or DOCX template", type=["html","docx"])
     if template_file:
@@ -222,6 +242,11 @@ OBC 9.26 (Roof coverings), 9.27 (Cladding), 5.4 (Moisture protection)
     else:
         st.info("No template = default HTML report.")
     
+    st.markdown("---")
+    
+    # ============================================================
+    # 6. UTILITY BUTTONS
+    # ============================================================
     if st.button("🔄 Refresh projects from cloud"):
         st.session_state.projects = load_all_projects()
         st.rerun()
@@ -300,8 +325,8 @@ with col1:
                 st.markdown("---")
         
         if st.button("⚡ Analyze all photos (batch)", type="primary"):
-            if not st.session_state["reference_text"].strip() and mode != "Work Progress Tracking":
-                st.error("Please provide reference text in sidebar.")
+            if not st.session_state["reference_text"].strip():
+                st.error("Please provide reference text in the Compliance Reference section (codes or tender documents).")
             else:
                 progress = st.progress(0)
                 with st.spinner("Batch analyzing all photos (parallel)..."):
@@ -406,4 +431,4 @@ if mode == "Work Progress Tracking" and st.session_state.current_project and st.
     else:
         st.info("No visits saved yet. Start a new visit and save it.")
 
-st.caption("✅ Data permanently stored in Firebase Cloud. Use 'Refresh projects from cloud' to sync across devices.")
+st.caption("✅ Data permanently stored in Firebase Cloud. Reference section (codes/tender) always active, independent of mode.")

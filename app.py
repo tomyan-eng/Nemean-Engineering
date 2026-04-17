@@ -8,22 +8,75 @@ import PyPDF2
 import docx
 import json
 from concurrent.futures import ThreadPoolExecutor, as_completed
+import requests
+from streamlit.components.v1 import html
 
 st.set_page_config(page_title="Nemean Engineering Inspector", layout="wide")
-st.title("🏗️ Nemean Engineering Inspector")
+st.title("🏗️ Nemean Engineering Inspector (Cloud Persistent)")
 st.markdown("Deficiency ID · Code/Tender Compliance · Work Progress Tracking")
+
+# ---------- Firebase REST API helpers ----------
+def get_firestore_url(collection, doc_id=None):
+    project_id = st.secrets["FIREBASE_PROJECT_ID"]
+    base = f"https://firestore.googleapis.com/v1/projects/{project_id}/databases/(default)/documents/{collection}"
+    if doc_id:
+        return f"{base}/{doc_id}"
+    return base
+
+def load_all_projects():
+    """Fetch all projects from Firestore"""
+    url = get_firestore_url("projects")
+    params = {"key": st.secrets["FIREBASE_API_KEY"]}
+    try:
+        response = requests.get(url, headers={"Content-Type": "application/json"}, params=params)
+        if response.status_code == 200:
+            data = response.json()
+            projects = {}
+            for doc in data.get("documents", []):
+                doc_id = doc["name"].split("/")[-1]
+                fields = doc["fields"]
+                proj_data = {
+                    "name": fields.get("name", {}).get("stringValue", doc_id),
+                    "visits": json.loads(fields.get("visits", {}).get("stringValue", "[]"))
+                }
+                projects[doc_id] = proj_data
+            return projects
+        else:
+            st.error(f"Failed to load projects: {response.text}")
+            return {}
+    except Exception as e:
+        st.error(f"Error loading: {e}")
+        return {}
+
+def save_project(project_name, project_data):
+    """Save or update a project in Firestore"""
+    doc_id = project_name.replace(" ", "_").replace("/", "_")
+    url = get_firestore_url("projects", doc_id) + f"?key={st.secrets['FIREBASE_API_KEY']}"
+    fields = {
+        "name": {"stringValue": project_name},
+        "visits": {"stringValue": json.dumps(project_data.get("visits", []))},
+        "updated_at": {"stringValue": datetime.now().isoformat()}
+    }
+    body = {"fields": fields}
+    response = requests.patch(url, headers={"Content-Type": "application/json"}, json=body)
+    return response.status_code in [200, 201]
+
+def delete_project(project_name):
+    doc_id = project_name.replace(" ", "_").replace("/", "_")
+    url = get_firestore_url("projects", doc_id) + f"?key={st.secrets['FIREBASE_API_KEY']}"
+    response = requests.delete(url, headers={"Content-Type": "application/json"})
+    return response.status_code == 200
 
 # ---------- API Key ----------
 try:
-    api_key = st.secrets["GEMINI_API_KEY"]
-    genai.configure(api_key=api_key)
+    genai.configure(api_key=st.secrets["GEMINI_API_KEY"])
     key_configured = True
 except:
     key_configured = False
 
-# ---------- Session State Initialization ----------
+# ---------- Session State ----------
 if "images_data" not in st.session_state:
-    st.session_state["images_data"] = []          # current session photos
+    st.session_state["images_data"] = []
 if "reference_text" not in st.session_state:
     st.session_state["reference_text"] = ""
 if "report_template" not in st.session_state:
@@ -40,7 +93,7 @@ Output in this exact format:
 
 Be concise. Do not add extra commentary."""
 if "projects" not in st.session_state:
-    st.session_state.projects = {}                # {project_name: {visits: []}}
+    st.session_state.projects = load_all_projects()
 if "current_project" not in st.session_state:
     st.session_state.current_project = None
 if "current_visit_date" not in st.session_state:
@@ -50,23 +103,19 @@ if "current_visit_date" not in st.session_state:
 with st.sidebar:
     st.header("⚙️ Configuration")
     
-    # API key fallback
     if not key_configured:
         api_key_input = st.text_input("Gemini API Key", type="password")
         if api_key_input:
             genai.configure(api_key=api_key_input)
             key_configured = True
     else:
-        st.success("✅ API key loaded")
+        st.success("✅ Gemini API ready")
     
     st.markdown("---")
-    
-    # Mode selection
     mode = st.radio("Main mode", ["Deficiency & Compliance", "Work Progress Tracking"])
     
     st.markdown("---")
     
-    # Reference section (codes or tender docs)
     if mode == "Deficiency & Compliance":
         st.subheader("📜 Reference (Codes / Tender)")
         ref_type = st.radio("Reference type", ["Building Codes (OBC/OFC)", "Tender / CCDC Documents"])
@@ -78,9 +127,9 @@ CSA A440.2 (Windows/Doors), CSA A23.1 (Concrete)
 ASTM C920 (Sealants), ASTM D6163 (Modified bitumen)
 OBC 9.26 (Roof coverings), 9.27 (Cladding), 5.4 (Moisture protection)
 """
-            st.session_state["reference_text"] = st.text_area("Reference codes (editable)", value=default_ref.strip(), height=200)
+            st.session_state["reference_text"] = st.text_area("Reference codes", value=default_ref.strip(), height=200)
         else:
-            ref_files = st.file_uploader("Upload PDF/DOCX/TXT (tender, CCDC, specs)", type=["pdf","docx","txt"], accept_multiple_files=True)
+            ref_files = st.file_uploader("Upload PDF/DOCX/TXT (tender, CCDC)", type=["pdf","docx","txt"], accept_multiple_files=True)
             if ref_files:
                 combined = ""
                 for f in ref_files:
@@ -101,9 +150,9 @@ OBC 9.26 (Roof coverings), 9.27 (Cladding), 5.4 (Moisture protection)
                     st.text(combined[:1000] + ("..." if len(combined)>1000 else ""))
             else:
                 st.info("Upload tender/CCDC documents for compliance analysis.")
+    
     else:  # Progress Tracking mode
-        st.subheader("📁 Project & Visit Management")
-        # Project selector
+        st.subheader("📁 Project Management (Cloud)")
         project_names = list(st.session_state.projects.keys())
         selected = st.selectbox("Select or create project", ["-- New Project --"] + project_names)
         if selected == "-- New Project --":
@@ -111,23 +160,21 @@ OBC 9.26 (Roof coverings), 9.27 (Cladding), 5.4 (Moisture protection)
             if new_name and st.button("Create Project"):
                 if new_name not in st.session_state.projects:
                     st.session_state.projects[new_name] = {"visits": []}
+                    save_project(new_name, st.session_state.projects[new_name])
                     st.session_state.current_project = new_name
-                    st.session_state.current_visit_date = None
                     st.rerun()
         else:
             st.session_state.current_project = selected
             st.success(f"Current: **{selected}**")
-            # Show existing visits
-            visits = st.session_state.projects[selected]["visits"]
+            visits = st.session_state.projects[selected].get("visits", [])
             if visits:
                 visit_dates = [v["date"] for v in visits]
-                st.selectbox("Previous visits (for reference)", visit_dates, key="prev_visit_select")
-            # Buttons
+                st.selectbox("Previous visits (for reference)", visit_dates, key="prev_visit")
             if st.button("➕ Start new site visit"):
                 st.session_state.current_visit_date = datetime.now().strftime("%Y-%m-%d %H:%M")
                 st.session_state.images_data = []
                 st.rerun()
-            if st.session_state.images_data and st.button("💾 Save current visit to project"):
+            if st.session_state.images_data and st.button("💾 Save current visit to cloud"):
                 visit_data = {
                     "date": st.session_state.current_visit_date or datetime.now().strftime("%Y-%m-%d %H:%M"),
                     "photos_b64": [],
@@ -142,36 +189,23 @@ OBC 9.26 (Roof coverings), 9.27 (Cladding), 5.4 (Moisture protection)
                     visit_data["notes"].append(img_data["notes"])
                     visit_data["analyses"].append(img_data["analysis"])
                 st.session_state.projects[st.session_state.current_project]["visits"].append(visit_data)
-                st.success("Visit saved!")
-            # Export/Import
-            if st.button("📤 Export all projects (JSON)"):
-                json_str = json.dumps(st.session_state.projects, indent=2)
-                st.download_button("Download backup", data=json_str, file_name="projects_backup.json")
-            uploaded_json = st.file_uploader("Restore projects", type=["json"])
-            if uploaded_json:
-                imported = json.load(uploaded_json)
-                st.session_state.projects = imported
+                save_project(st.session_state.current_project, st.session_state.projects[st.session_state.current_project])
+                st.success("Visit saved to cloud!")
+            if st.button("🗑️ Delete this project"):
+                delete_project(selected)
+                del st.session_state.projects[selected]
+                st.session_state.current_project = None
                 st.rerun()
-        # For progress mode, reference can be optional but we keep a text area
         st.session_state["reference_text"] = st.text_area("Project scope / schedule notes (optional)", height=100)
     
     st.markdown("---")
-    
-    # Persistent analysis prompt (shared across modes)
-    st.subheader("✏️ Analysis Prompt (persistent)")
-    prompt_editor = st.text_area(
-        "Edit prompt – it stays until you change it",
-        value=st.session_state["persistent_prompt"],
-        height=200,
-        key="prompt_editor_widget"
-    )
+    st.subheader("✏️ Analysis Prompt")
+    prompt_editor = st.text_area("Edit prompt (persistent)", value=st.session_state["persistent_prompt"], height=200)
     if prompt_editor != st.session_state["persistent_prompt"]:
         st.session_state["persistent_prompt"] = prompt_editor
     
     st.markdown("---")
-    
-    # Template upload (shared)
-    st.subheader("📝 Report Template (optional)")
+    st.subheader("📝 Report Template")
     template_file = st.file_uploader("Upload HTML or DOCX template", type=["html","docx"])
     if template_file:
         try:
@@ -188,7 +222,11 @@ OBC 9.26 (Roof coverings), 9.27 (Cladding), 5.4 (Moisture protection)
     else:
         st.info("No template = default HTML report.")
     
-    if st.button("🗑️ Clear all current photos"):
+    if st.button("🔄 Refresh projects from cloud"):
+        st.session_state.projects = load_all_projects()
+        st.rerun()
+    
+    if st.button("🗑️ Clear current photos"):
         st.session_state.images_data = []
         st.rerun()
 
@@ -290,14 +328,12 @@ with col2:
         if not key_configured:
             st.error("API key missing")
         else:
-            # Build placeholders
             placeholders = {
                 "DATE": datetime.now().strftime("%Y-%m-%d %H:%M"),
                 "TITLE": report_title,
                 "PROJECT_INFO": project_info.replace("\n", "<br>"),
                 "TOTAL_PHOTOS": str(len(st.session_state.images_data))
             }
-            # For each photo, add image base64, notes, analysis, filename
             for i, data in enumerate(st.session_state.images_data, start=1):
                 buff = io.BytesIO()
                 data["image"].save(buff, format="JPEG")
@@ -312,7 +348,6 @@ with col2:
                 for key, value in placeholders.items():
                     html_output = html_output.replace(f"{{{{{key}}}}}", str(value))
             else:
-                # Default HTML report
                 html_output = f"""
                 <html><head><meta charset="UTF-8"><title>{report_title}</title>
                 <style>body{{font-family:Arial;margin:40px}} .photo{{margin-bottom:30px;border-bottom:1px solid #ccc}}</style>
@@ -334,7 +369,7 @@ with col2:
                         <p><strong>Analysis:</strong><br>{data['analysis'].replace(chr(10),'<br>') if data['analysis'] else 'Not analyzed'}</p>
                     </div><hr>
                     """
-                html_output += "<p><i>Generated by Nemean Engineering Inspector</i></p></body></html>"
+                html_output += "<p><i>Generated by Nemean Engineering Inspector (Cloud)</i></p></body></html>"
             
             st.session_state["final_report"] = html_output
             st.success("Report generated")
@@ -371,4 +406,4 @@ if mode == "Work Progress Tracking" and st.session_state.current_project and st.
     else:
         st.info("No visits saved yet. Start a new visit and save it.")
 
-st.caption("Enhanced with project tracking, batch analysis, custom templates, and persistent prompts. Use mode switcher for compliance or progress.")
+st.caption("✅ Data permanently stored in Firebase Cloud. Use 'Refresh projects from cloud' to sync across devices.")
